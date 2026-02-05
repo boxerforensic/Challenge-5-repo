@@ -1,4 +1,5 @@
 import streamlit as st
+from pathlib import Path  # ✅ 추가
 
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -21,17 +22,15 @@ if "messages" not in st.session_state:
 if "_last_ai_answer" not in st.session_state:
     st.session_state["_last_ai_answer"] = ""
 
-# 파일 바뀌면 리셋하기 위한 키
 if "active_file" not in st.session_state:
     st.session_state["active_file"] = None
 
-# "I'm ready!"를 매번 안 찍히게 제어
 if "_ready_shown" not in st.session_state:
     st.session_state["_ready_shown"] = False
 
 
 # ---------------------------
-# Memory (✅ 항상 getter로만 접근해서 KeyError 방지)
+# Memory
 # ---------------------------
 def get_memory() -> ConversationBufferMemory:
     if "memory" not in st.session_state:
@@ -94,6 +93,10 @@ class ChatCallbackHandler(BaseCallbackHandler):
 # ---------------------------
 @st.cache_data(show_spinner="Embedding file...")
 def embed_file(file_bytes: bytes, file_name: str, api_key_hash: str):
+    # ✅ 폴더 보장 (없으면 FileNotFoundError)
+    Path("./.cache/files").mkdir(parents=True, exist_ok=True)
+    Path(f"./.cache/embeddings/{file_name}").mkdir(parents=True, exist_ok=True)
+
     file_path = f"./.cache/files/{file_name}"
     with open(file_path, "wb") as f:
         f.write(file_bytes)
@@ -117,8 +120,15 @@ def embed_file_with_key(file_bytes: bytes, file_name: str, api_key: str):
 
     api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
-    @st.cache_data(show_spinner="Embedding file...", hash_funcs={bytes: lambda b: hashlib.sha256(b).hexdigest()})
+    @st.cache_data(
+        show_spinner="Embedding file...",
+        hash_funcs={bytes: lambda b: hashlib.sha256(b).hexdigest()},
+    )
     def _embed(file_bytes_inner: bytes, file_name_inner: str, api_key_hash_inner: str):
+        # ✅ 폴더 보장 (여기가 실제로 호출되는 곳이라 필수)
+        Path("./.cache/files").mkdir(parents=True, exist_ok=True)
+        Path(f"./.cache/embeddings/{file_name_inner}").mkdir(parents=True, exist_ok=True)
+
         file_path = f"./.cache/files/{file_name_inner}"
         with open(file_path, "wb") as f:
             f.write(file_bytes_inner)
@@ -156,31 +166,20 @@ prompt = ChatPromptTemplate.from_messages(
             "If the user asks about the conversation itself (e.g., 'what was my first question?'), "
             "answer using the chat history.\n"
             "If you don't know, say you don't know. Don't make anything up.\n\n"
-            "Context:\n{context}\n\n"
+            "Context:\n{context}\n\n",
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}"),
     ]
 )
 
-
 st.set_page_config(page_title="Challenge-5", page_icon="📃")
 st.title("DocumentGPT")
-st.markdown(
-    """
-Welcome!
-
-Use this chatbot to ask questions to an AI about your files!
-
-Upload your files on the sidebar.
-"""
-)
 
 with st.sidebar:
     file = st.file_uploader("Upload a .txt .pdf or .docx file", type=["pdf", "txt", "docx"])
     api_key = st.text_input("Come on Input Your AI Key", type="password")
     reset = st.button("Reset chat")
-
 
 if reset:
     st.session_state["messages"] = []
@@ -190,16 +189,14 @@ if reset:
     st.session_state.pop("memory", None)
     st.rerun()
 
-
 if file and api_key:
-    # 파일이 바뀌면 리셋
     if st.session_state.get("active_file") != file.name:
         st.session_state["active_file"] = file.name
         st.session_state["messages"] = []
         st.session_state["_last_ai_answer"] = ""
         st.session_state["_ready_shown"] = False
         st.session_state.pop("memory", None)
-        _ = get_memory()  # 새 메모리 생성
+        _ = get_memory()
 
     file_bytes = file.getvalue()
     retriever = embed_file_with_key(file_bytes, file.name, api_key)
@@ -241,6 +238,5 @@ if file and api_key:
         ai_answer = st.session_state.get("_last_ai_answer", "")
         if ai_answer:
             memory.chat_memory.add_ai_message(ai_answer)
-
 else:
     pass
