@@ -9,8 +9,8 @@ from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.embeddings import CacheBackedEmbeddings
 
-from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
@@ -24,17 +24,15 @@ if "messages" not in st.session_state:
 if "_last_ai_answer" not in st.session_state:
     st.session_state["_last_ai_answer"] = ""
 
-# 파일 바뀌면 리셋하기 위한 키
 if "active_file" not in st.session_state:
     st.session_state["active_file"] = None
 
-# "I'm ready!"를 매번 안 찍히게 제어
 if "_ready_shown" not in st.session_state:
     st.session_state["_ready_shown"] = False
 
 
 # ---------------------------
-# Memory (✅ 항상 getter로만 접근해서 KeyError 방지)
+# Memory (KeyError 방지)
 # ---------------------------
 def get_memory() -> ConversationBufferMemory:
     if "memory" not in st.session_state:
@@ -93,11 +91,26 @@ class ChatCallbackHandler(BaseCallbackHandler):
 
 
 # ---------------------------
+# Loader 선택
+# ---------------------------
+def load_docs(file_path: str):
+    lower = file_path.lower()
+    if lower.endswith(".pdf"):
+        loader = PyPDFLoader(file_path)
+        return loader.load()
+    if lower.endswith(".docx"):
+        loader = Docx2txtLoader(file_path)
+        return loader.load()
+    # txt (기본)
+    loader = TextLoader(file_path, encoding="utf-8")
+    return loader.load()
+
+
+# ---------------------------
 # Retriever / Embedding
 # ---------------------------
 def embed_file_with_key(file_bytes: bytes, file_name: str, api_key: str):
     import hashlib
-
     api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
     @st.cache_data(
@@ -105,7 +118,7 @@ def embed_file_with_key(file_bytes: bytes, file_name: str, api_key: str):
         hash_funcs={bytes: lambda b: hashlib.sha256(b).hexdigest()},
     )
     def _embed(file_bytes_inner: bytes, file_name_inner: str, api_key_hash_inner: str):
-        # ✅ Streamlit Cloud에서 폴더가 없어서 FileNotFoundError 나는 것 방지
+        # 폴더 보장
         Path("./.cache/files").mkdir(parents=True, exist_ok=True)
         Path(f"./.cache/embeddings/{file_name_inner}").mkdir(parents=True, exist_ok=True)
 
@@ -121,8 +134,8 @@ def embed_file_with_key(file_bytes: bytes, file_name: str, api_key: str):
             chunk_overlap=100,
         )
 
-        loader = UnstructuredFileLoader(file_path)
-        docs = loader.load_and_split(text_splitter=splitter)
+        docs = load_docs(file_path)
+        docs = splitter.split_documents(docs)
 
         embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
@@ -146,8 +159,6 @@ prompt = ChatPromptTemplate.from_messages(
             "system",
             "You are a helpful assistant.\n"
             "Use BOTH the uploaded file context and the chat history to answer.\n"
-            "If the user asks about the conversation itself (e.g., 'what was my first question?'), "
-            "answer using the chat history.\n"
             "If you don't know, say you don't know. Don't make anything up.\n\n"
             "Context:\n{context}\n\n"
         ),
@@ -162,27 +173,13 @@ prompt = ChatPromptTemplate.from_messages(
 # ---------------------------
 st.set_page_config(page_title="Challenge-5", page_icon="📃")
 st.title("DocumentGPT")
-st.markdown(
-    """
-Welcome!
-
-Use this chatbot to ask questions to an AI about your files!
-
-Upload your files on the sidebar.
-"""
-)
 
 with st.sidebar:
     file = st.file_uploader("Upload a .txt .pdf or .docx file", type=["pdf", "txt", "docx"])
-    # ✅ Streamlit Secrets 사용 가능하면 자동 채움 (선택)
     default_key = st.secrets.get("OPENAI_API_KEY", "")
     api_key = st.text_input("OpenAI API Key", value=default_key, type="password")
     reset = st.button("Reset chat")
 
-
-# ---------------------------
-# Reset
-# ---------------------------
 if reset:
     st.session_state["messages"] = []
     st.session_state["_last_ai_answer"] = ""
@@ -196,17 +193,15 @@ if reset:
 # Main
 # ---------------------------
 if file and api_key:
-    # 파일이 바뀌면 리셋
     if st.session_state.get("active_file") != file.name:
         st.session_state["active_file"] = file.name
         st.session_state["messages"] = []
         st.session_state["_last_ai_answer"] = ""
         st.session_state["_ready_shown"] = False
         st.session_state.pop("memory", None)
-        _ = get_memory()  # 새 메모리 생성
+        _ = get_memory()
 
-    file_bytes = file.getvalue()
-    retriever = embed_file_with_key(file_bytes, file.name, api_key)
+    retriever = embed_file_with_key(file.getvalue(), file.name, api_key)
 
     llm = ChatOpenAI(
         model="gpt-4o-mini",
@@ -239,15 +234,12 @@ if file and api_key:
         memory = get_memory()
         memory.chat_memory.add_user_message(user_msg)
 
-        # ✅ 이전 답변이 남아있을 수 있어 초기화
         st.session_state["_last_ai_answer"] = ""
-
         with st.chat_message("ai"):
             _ = chain.invoke(user_msg)
 
         ai_answer = st.session_state.get("_last_ai_answer", "")
         if ai_answer:
             memory.chat_memory.add_ai_message(ai_answer)
-
 else:
     st.info("Upload a file and provide your OpenAI API key to start.")

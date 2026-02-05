@@ -1,7 +1,5 @@
 streamlit==1.32.2
 
-streamlit==1.32.2
-
 langchain==0.1.16
 langchain-community==0.0.34
 langchain-openai==0.1.6
@@ -11,6 +9,5 @@ tiktoken==0.6.0
 
 faiss-cpu==1.9.0.post1
 
-unstructured[docx,pdf]==0.12.6
 pypdf==4.1.0
-python-docx==1.1.0
+docx2txt==0.8
