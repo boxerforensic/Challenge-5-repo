@@ -1,56 +1,34 @@
 import streamlit as st
-from pathlib import Path
 
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.document_loaders import UnstructuredFileLoader
+from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
 from langchain.storage import LocalFileStore
 from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores.faiss import FAISS
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
+from langchain.chat_models import ChatOpenAI
 from langchain.callbacks.base import BaseCallbackHandler
-from langchain.embeddings import CacheBackedEmbeddings
-
-from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
-
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 
-# ---------------------------
-# Session state init
-# ---------------------------
+#session_state에 저장할 것들
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
 if "_last_ai_answer" not in st.session_state:
     st.session_state["_last_ai_answer"] = ""
 
+#streamlit이 다시 시작되도 세션은 유지된다.
+if "memory" not in st.session_state:
+    st.session_state["memory"] = ConversationBufferMemory(
+        memory_key = "chat_history",
+        return_messages=True
+    )
+#파일이 리셋되면 다시 대화를 리셋하기 위해.
 if "active_file" not in st.session_state:
     st.session_state["active_file"] = None
 
-if "_ready_shown" not in st.session_state:
-    st.session_state["_ready_shown"] = False
-
-
-# ---------------------------
-# Memory (KeyError 방지)
-# ---------------------------
-def get_memory() -> ConversationBufferMemory:
-    if "memory" not in st.session_state:
-        st.session_state["memory"] = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True,
-        )
-    return st.session_state["memory"]
-
-
-def load_chat_history(_):
-    memory = get_memory()
-    return memory.load_memory_variables({})["chat_history"]
-
-
-# ---------------------------
-# UI helpers
-# ---------------------------
 def save_message(message, role):
     st.session_state["messages"].append({"message": message, "role": role})
 
@@ -77,6 +55,7 @@ class ChatCallbackHandler(BaseCallbackHandler):
         self.message_box = None
 
     def on_llm_start(self, *args, **kwargs):
+        # 매 요청마다 초기화 (안 하면 이전 답변 뒤에 계속 붙음)
         self.message = ""
         self.message_box = st.empty()
 
@@ -86,64 +65,46 @@ class ChatCallbackHandler(BaseCallbackHandler):
             self.message_box.markdown(self.message)
 
     def on_llm_end(self, *args, **kwargs):
+        # 최종 답변 저장
         save_message(self.message, role="ai")
         st.session_state["_last_ai_answer"] = self.message
 
 
-# ---------------------------
-# Loader 선택
-# ---------------------------
-def load_docs(file_path: str):
-    lower = file_path.lower()
-    if lower.endswith(".pdf"):
-        loader = PyPDFLoader(file_path)
-        return loader.load()
-    if lower.endswith(".docx"):
-        loader = Docx2txtLoader(file_path)
-        return loader.load()
-    # txt (기본)
-    loader = TextLoader(file_path, encoding="utf-8")
-    return loader.load()
-
-
-# ---------------------------
-# Retriever / Embedding
-# ---------------------------
-def embed_file_with_key(file_bytes: bytes, file_name: str, api_key: str):
-    import hashlib
-    api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-
-    @st.cache_data(
-        show_spinner="Embedding file...",
-        hash_funcs={bytes: lambda b: hashlib.sha256(b).hexdigest()},
-    )
-    def _embed(file_bytes_inner: bytes, file_name_inner: str, api_key_hash_inner: str):
-        # 폴더 보장
-        Path("./.cache/files").mkdir(parents=True, exist_ok=True)
-        Path(f"./.cache/embeddings/{file_name_inner}").mkdir(parents=True, exist_ok=True)
-
-        file_path = f"./.cache/files/{file_name_inner}"
-        with open(file_path, "wb") as f:
-            f.write(file_bytes_inner)
-
-        cache_dir = LocalFileStore(f"./.cache/embeddings/{file_name_inner}")
-
-        splitter = CharacterTextSplitter.from_tiktoken_encoder(
-            separator="\n",
-            chunk_size=600,
-            chunk_overlap=100,
+#메모리에서 데이터를 가지고 옴. 랭체인 병렬 실행으로 인해 get_memory에서 memory를 초기화해서 만들어줌.
+def get_memory():
+    if "memory" not in st.session_state:
+        st.session_state["memory"] = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True,
         )
+    return st.session_state["memory"]
 
-        docs = load_docs(file_path)
-        docs = splitter.split_documents(docs)
+def load_chat_history(_):
+    memory = get_memory()
+    return memory.load_memory_variables({})["chat_history"]
 
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-        cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
+@st.cache_data(show_spinner="Embedding file...")
+def embed_file(file_bytes: bytes, file_name: str, api_key: str):
+    file_path = f"./.cache/files/{file_name}"
+    with open(file_path, "wb") as f:
+        f.write(file_bytes)
 
-        vectorstore = FAISS.from_documents(docs, cached_embeddings)
-        return vectorstore.as_retriever()
+    cache_dir = LocalFileStore(f"./.cache/embeddings/{file_name}")
 
-    return _embed(file_bytes, file_name, api_key_hash)
+    splitter = CharacterTextSplitter.from_tiktoken_encoder(
+        separator="\n",
+        chunk_size=600,
+        chunk_overlap=100,
+    )
+
+    loader = UnstructuredFileLoader(file_path)
+    docs = loader.load_and_split(text_splitter=splitter)
+
+    embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+    cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
+
+    vectorstore = FAISS.from_documents(docs, cached_embeddings)
+    return vectorstore.as_retriever()
 
 
 def format_docs(docs):
@@ -151,7 +112,7 @@ def format_docs(docs):
 
 
 # ---------------------------
-# Prompt
+# Prompt (키 일치!)
 # ---------------------------
 prompt = ChatPromptTemplate.from_messages(
     [
@@ -173,35 +134,33 @@ prompt = ChatPromptTemplate.from_messages(
 # ---------------------------
 st.set_page_config(page_title="Challenge-5", page_icon="📃")
 st.title("DocumentGPT")
+st.markdown(
+    """
+Welcome!
+
+Use this chatbot to ask questions to an AI about your files!
+
+Upload your files on the sidebar.
+"""
+)
 
 with st.sidebar:
     file = st.file_uploader("Upload a .txt .pdf or .docx file", type=["pdf", "txt", "docx"])
-    default_key = st.secrets.get("OPENAI_API_KEY", "")
-    api_key = st.text_input("OpenAI API Key", value=default_key, type="password")
-    reset = st.button("Reset chat")
+    api_key = st.text_input("Come on Input Your AI Key", type="password")
 
-if reset:
-    st.session_state["messages"] = []
-    st.session_state["_last_ai_answer"] = ""
-    st.session_state["_ready_shown"] = False
-    st.session_state["active_file"] = None
-    st.session_state.pop("memory", None)
-    st.rerun()
-
-
-# ---------------------------
-# Main
-# ---------------------------
+#Main
 if file and api_key:
+    #파일이 전환되면 많은 데이터 리셋
     if st.session_state.get("active_file") != file.name:
         st.session_state["active_file"] = file.name
         st.session_state["messages"] = []
-        st.session_state["_last_ai_answer"] = ""
-        st.session_state["_ready_shown"] = False
+        st.session_state["_last_ai_answer"] =""
         st.session_state.pop("memory", None)
-        _ = get_memory()
-
-    retriever = embed_file_with_key(file.getvalue(), file.name, api_key)
+        _ = get_memory() #새 메모리 생성
+        
+        
+    file_bytes = file.getvalue()
+    retriever = embed_file(file_bytes, file.name, api_key)
 
     llm = ChatOpenAI(
         model="gpt-4o-mini",
@@ -211,35 +170,36 @@ if file and api_key:
         callbacks=[ChatCallbackHandler()],
     )
 
+    # 체인은 한번만 만들고 재사용
     chain = (
         {
             "context": retriever | RunnableLambda(format_docs),
-            "chat_history": RunnableLambda(load_chat_history),
+            "chat_history": RunnableLambda(load_chat_history), 
             "question": RunnablePassthrough(),
         }
         | prompt
         | llm
     )
 
-    if not st.session_state["_ready_shown"]:
-        send_message("I'm ready! Ask away!", "ai", save=False)
-        st.session_state["_ready_shown"] = True
-
+    send_message("I'm ready! Ask away!", "ai", save=False)
     paint_history()
 
     user_msg = st.chat_input("Ask anything about your file...")
     if user_msg:
         send_message(user_msg, "human")
-
+        #메시지를 하나씩 저장해야 참조할 수 있음.
         memory = get_memory()
+        #memory는 st.session_state["messages"]로 대용할 수 있음.
         memory.chat_memory.add_user_message(user_msg)
-
-        st.session_state["_last_ai_answer"] = ""
+        # 실행 + memory 저장
         with st.chat_message("ai"):
-            _ = chain.invoke(user_msg)
-
+            _ = chain.invoke(user_msg)  # result는 AIMessage
+        #_last_ai_answer가 없으면 ""를 반환
         ai_answer = st.session_state.get("_last_ai_answer", "")
         if ai_answer:
             memory.chat_memory.add_ai_message(ai_answer)
+
 else:
-    st.info("Upload a file and provide your OpenAI API key to start.")
+    # 파일/키가 없을 때도 messages를 매번 초기화하면 대화가 계속 날아감.
+    # 여기서는 초기화하지 않음.
+    pass
