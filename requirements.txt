@@ -1,6 +1,7 @@
 streamlit==1.32.2
 
-# LangChain (0.1.x 고정: 네 코드 import 경로와 호환)
+streamlit==1.32.2
+
 langchain==0.1.16
 langchain-community==0.0.34
 langchain-openai==0.1.6
@@ -8,14 +9,8 @@ langchain-openai==0.1.6
 openai==1.14.3
 tiktoken==0.6.0
 
-# FAISS (Streamlit Cloud는 Linux라 faiss-cpu 설치 OK)
-faiss-cpu==1.7.4
+faiss-cpu==1.9.0.post1
 
-# 문서 로더
-unstructured==0.12.6
-unstructured[pdf]==0.12.6
-unstructured[docx]==0.12.6
-
-# unstructured가 환경에 따라 추가로 필요할 때가 많음
+unstructured[docx,pdf]==0.12.6
 pypdf==4.1.0
 python-docx==1.1.0

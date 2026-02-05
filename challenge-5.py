@@ -1,15 +1,18 @@
 import streamlit as st
+from pathlib import Path
 
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.document_loaders import UnstructuredFileLoader
-from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
 from langchain.storage import LocalFileStore
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.vectorstores.faiss import FAISS
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
-from langchain.chat_models import ChatOpenAI
 from langchain.callbacks.base import BaseCallbackHandler
+from langchain.embeddings import CacheBackedEmbeddings
+
+from langchain_community.document_loaders import UnstructuredFileLoader
+from langchain_community.vectorstores import FAISS
+
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 
 # ---------------------------
@@ -92,33 +95,20 @@ class ChatCallbackHandler(BaseCallbackHandler):
 # ---------------------------
 # Retriever / Embedding
 # ---------------------------
-@st.cache_data(show_spinner="Embedding file...")
-def embed_file(file_bytes: bytes, file_name: str, api_key_hash: str):
-    file_path = f"./.cache/files/{file_name}"
-    with open(file_path, "wb") as f:
-        f.write(file_bytes)
-
-    cache_dir = LocalFileStore(f"./.cache/embeddings/{file_name}")
-
-    splitter = CharacterTextSplitter.from_tiktoken_encoder(
-        separator="\n",
-        chunk_size=600,
-        chunk_overlap=100,
-    )
-
-    loader = UnstructuredFileLoader(file_path)
-    docs = loader.load_and_split(text_splitter=splitter)
-
-    raise RuntimeError("embed_file() should be called via embed_file_with_key()")
-
-
 def embed_file_with_key(file_bytes: bytes, file_name: str, api_key: str):
     import hashlib
 
     api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
-    @st.cache_data(show_spinner="Embedding file...", hash_funcs={bytes: lambda b: hashlib.sha256(b).hexdigest()})
+    @st.cache_data(
+        show_spinner="Embedding file...",
+        hash_funcs={bytes: lambda b: hashlib.sha256(b).hexdigest()},
+    )
     def _embed(file_bytes_inner: bytes, file_name_inner: str, api_key_hash_inner: str):
+        # ✅ Streamlit Cloud에서 폴더가 없어서 FileNotFoundError 나는 것 방지
+        Path("./.cache/files").mkdir(parents=True, exist_ok=True)
+        Path(f"./.cache/embeddings/{file_name_inner}").mkdir(parents=True, exist_ok=True)
+
         file_path = f"./.cache/files/{file_name_inner}"
         with open(file_path, "wb") as f:
             f.write(file_bytes_inner)
@@ -147,6 +137,9 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
+# ---------------------------
+# Prompt
+# ---------------------------
 prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -164,6 +157,9 @@ prompt = ChatPromptTemplate.from_messages(
 )
 
 
+# ---------------------------
+# UI
+# ---------------------------
 st.set_page_config(page_title="Challenge-5", page_icon="📃")
 st.title("DocumentGPT")
 st.markdown(
@@ -178,10 +174,15 @@ Upload your files on the sidebar.
 
 with st.sidebar:
     file = st.file_uploader("Upload a .txt .pdf or .docx file", type=["pdf", "txt", "docx"])
-    api_key = st.text_input("Come on Input Your AI Key", type="password")
+    # ✅ Streamlit Secrets 사용 가능하면 자동 채움 (선택)
+    default_key = st.secrets.get("OPENAI_API_KEY", "")
+    api_key = st.text_input("OpenAI API Key", value=default_key, type="password")
     reset = st.button("Reset chat")
 
 
+# ---------------------------
+# Reset
+# ---------------------------
 if reset:
     st.session_state["messages"] = []
     st.session_state["_last_ai_answer"] = ""
@@ -191,6 +192,9 @@ if reset:
     st.rerun()
 
 
+# ---------------------------
+# Main
+# ---------------------------
 if file and api_key:
     # 파일이 바뀌면 리셋
     if st.session_state.get("active_file") != file.name:
@@ -235,6 +239,9 @@ if file and api_key:
         memory = get_memory()
         memory.chat_memory.add_user_message(user_msg)
 
+        # ✅ 이전 답변이 남아있을 수 있어 초기화
+        st.session_state["_last_ai_answer"] = ""
+
         with st.chat_message("ai"):
             _ = chain.invoke(user_msg)
 
@@ -243,4 +250,4 @@ if file and api_key:
             memory.chat_memory.add_ai_message(ai_answer)
 
 else:
-    pass
+    st.info("Upload a file and provide your OpenAI API key to start.")
